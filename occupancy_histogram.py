@@ -162,15 +162,14 @@ def get_occupancy_b_df(repeat_xtal_csv_path, params):
 def all_lig_occ(repeat_xtal_csv_path, params):
     """ Get all ligands occupancy for a single repeat soak"""
 
-    all_lig_occupancy = np.empty([1, 1])
+    all_lig_occupancy = []
 
     for occ_b_df in get_occupancy_b_df(repeat_xtal_csv_path, params):
         # Check whether the ligand has a single occupancy value
         # TODO Change to not rely on positional indexing of occupancy value, use column name
         if occ_b_df.apply(lambda x: x.nunique())[1] == 1:
             lig_occ = occ_b_df.loc("Occupancy")[0][1]
-            print lig_occ
-            all_lig_occupancy = np.append(all_lig_occ,lig_occ)
+            all_lig_occupancy.append(lig_occ)
         else:
             print "Occupancy varies across ligand, histogram not currently generated"
             exit()
@@ -182,14 +181,13 @@ def all_lig_occ(repeat_xtal_csv_path, params):
 def occupancy_histogram(compound, all_lig_occupancy, params):
     """Use Occupancy dataframes to generate histogram"""
 
-    plt.hist(all_lig_occ, rwidth=0.75)
+    plt.hist(all_lig_occupancy, rwidth=0.75)
     plt.xlim(0, 1)
     plt.title("Occupancy Histogram: {}".format(compound))
     plt.xlabel("Occupancy")
     plt.ylabel("Frequency")
     plt.savefig("occ_hist.png", dpi=params.options.plot_dpi)
     plt.close()
-
 
 def b_atom_plot(repeat_xtal_csv_path, params):
     """ Use Occupancy & B factor df to generate plots of B factor against atom name """
@@ -226,6 +224,7 @@ def b_occ_scatter(repeat_xtal_csv_path, params):
     plt.plot(all_occ_b_df.Occupancy, m * all_occ_b_df.Occupancy + b, '-')
 
     plt.savefig("b_occ.png", dpi=params.options.plot_dpi)
+    plt.close()
 
 
 # TODO Understand how occupancy convergence is measured in refmac refinements.
@@ -263,11 +262,16 @@ def run(params):
 
     # Loop over all compounds in database with more than params.options.min_repeat
     # If the compounds have bound conformations, generate plots to show occupancy
+
+    # TODO Add discrete folders for each compound output
+    # TODO Add ability to loop over multiple database files
+    # TODO Add naming of
+
     for compound_csv, compound in detect_repeat_soaks(params):
         if repeat_soak_has_bound_conformation(compound_csv):
             all_ligand_occupancy = all_lig_occ(compound_csv, params)
             occupancy_histogram(compound, all_ligand_occupancy, params)
-            b_atom_scatter_plot(compound_csv, params)
+            b_atom_plot(compound_csv, params)
             b_occ_scatter(compound_csv, params)
         else:
             print "Repeat Soak with {} has no bound conformations".format(compound)
