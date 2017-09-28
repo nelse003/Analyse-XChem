@@ -1,5 +1,6 @@
 import sqlite3
-import os, sys
+import os
+import sys
 import pandas as pd
 from iotbx.pdb import hierarchy
 import libtbx.phil
@@ -42,11 +43,13 @@ options{
 
 
 ##############################################################
+
+
 def append_multiple_databases():
     pass
 
 
-def detect_repeat_soaks(params):
+def detect_repeat_soaks(protein_name, params):
     """ From XCE SQL database detect which ligands are repeated. Output to CSV."""
 
     # Open connection to sqlite database
@@ -69,7 +72,6 @@ def detect_repeat_soaks(params):
             continue
         elif compound[0] is u'':
             continue
-
         else:
             cur.execute("SELECT CompoundSMILES, CrystalName, RefinementBoundConformation FROM mainTable WHERE "
                         "CompoundSMILES == ?", (compound[0],))
@@ -79,11 +81,42 @@ def detect_repeat_soaks(params):
             repeat_xtals_df = pd.DataFrame(repeat_xtals, columns=["CompoundSMILES", "CrystalName",
                                                                   "RefinementBoundConformation"])
             file_name = str(compound[1]) + '.csv'
-            file_path = os.path.join(params.output.out_dir, file_name)
+            file_path = os.path.join(params.output.out_dir, protein_name, file_name)
             repeat_xtals_df.to_csv(file_path)
+
             yield file_path, compound[1]
 
     # Close connection to the database
+    cur.close()
+
+
+def get_protein_name(params):
+    """ Get protein name from database. Check datbase has only one protein in it"""
+
+    # Open connection to sqlite database
+    conn = sqlite3.connect(params.input.database_path)
+    cur = conn.cursor()
+
+    # Get Protein Name
+    cur.execute("SELECT DISTINCT ProteinName FROM mainTable")
+    clean_protein_list = []
+    protein_names = cur.fetchall()
+    for protein in protein_names:
+        if protein[0] is None:
+            continue
+        elif protein[0] is u'':
+            continue
+        elif protein[0] in u'None':
+            continue
+        else:
+            clean_protein_list.append(protein[0])
+    if len(clean_protein_list) == 1:
+        return clean_protein_list[0]
+    else:
+        print "Mulitple proteins in single datasource, Quitting as this needs handling seperately"
+        # TODO Change to better error handling, and skip this database
+        os._exit(1)
+
     cur.close()
 
 
@@ -91,7 +124,7 @@ def repeat_soak_has_bound_conformation(repeat_xtal_csv_path):
     """ Return Boolean based on whether repeat soak has any bound conformations"""
     repeat_xtal_df = pd.read_csv(repeat_xtal_csv_path, header=0)
     # Return False if repeat xtal dataframe is empty once NaN rows are removed
-    return not (repeat_xtal_df.dropna().empty)
+    return not repeat_xtal_df.dropna().empty
 
 
 def get_pandda_lig_chain(pdb_path, params):
@@ -153,7 +186,6 @@ def get_occupancy_b_df(repeat_xtal_csv_path, params):
     repeat_xtal_clean = repeat_xtal_df.dropna()
     for index, row in repeat_xtal_clean.iterrows():
         pdb_path = row['RefinementBoundConformation']
-        smiles = row['CompoundSMILES']
         occ_b_df = read_ligand_occupancy_b(pdb_path, params)
 
         yield occ_b_df
@@ -177,41 +209,56 @@ def all_lig_occ(repeat_xtal_csv_path, params):
     return all_lig_occupancy
 
 
-# TODO Add name of ligand to title of plot
-def occupancy_histogram(compound, all_lig_occupancy, params):
+# TODO Add protein name to title of plot
+def occupancy_histogram(protein_name, compound, all_lig_occupancy, params):
     """Use Occupancy dataframes to generate histogram"""
+
+    if len(all_lig_occupancy) == 1:
+        print "Only one soak, no histogram generated"
+        return
 
     plt.hist(all_lig_occupancy, rwidth=0.75)
     plt.xlim(0, 1)
-    plt.title("Occupancy Histogram: {}".format(compound))
+    plt.title("Occupancy Histogram: {} : {}".format(protein_name, compound))
     plt.xlabel("Occupancy")
     plt.ylabel("Frequency")
-    plt.savefig("occ_hist.png", dpi=params.options.plot_dpi)
+
+    file_path = os.path.join(params.output.out_dir, protein_name, compound, "occ_hist.png")
+
+    plt.savefig(file_path, dpi=params.options.plot_dpi)
     plt.close()
 
-def b_atom_plot(repeat_xtal_csv_path, params):
+
+# TODO Add Colourbar
+def b_atom_plot(protein_name, compound, repeat_xtal_csv_path, params):
     """ Use Occupancy & B factor df to generate plots of B factor against atom name """
 
-    for occ_b_df in get_occupancy_b_df(repeat_xtal_csv_path, params):
-        cmap = matplotlib.cm.get_cmap('OrRd')
-        plt.xlabel("Atoms")
-        plt.ylabel("B Factor")
-        ax = plt.gca()
+    fig, ax = plt.subplots()
+    plt.title("{} {}".format(protein_name, compound))
+    plt.xlabel("Atoms")
+    plt.ylabel("B Factor")
+    cmap = matplotlib.cm.get_cmap('OrRd')
 
+    for occ_b_df in get_occupancy_b_df(repeat_xtal_csv_path, params):
         ax.xaxis.set_ticks(np.arange(len(occ_b_df['Atom'])))
         ax.xaxis.set_ticklabels(occ_b_df['Atom'], rotation=90)
 
         colour = cmap(occ_b_df["Occupancy"].mean())
         plt.plot(occ_b_df.B_factor, c=colour)
-    plt.savefig("b_scatter.png", dpi=params.options.plot_dpi)
+
+    file_path = os.path.join(params.output.out_dir, protein_name, compound, "b_scatter.png")
+
+    plt.savefig(file_path, dpi=params.options.plot_dpi)
     plt.close()
 
 
-def b_occ_scatter(repeat_xtal_csv_path, params):
+def b_occ_scatter(protein_name, compound, repeat_xtal_csv_path, params):
     """ Plot Occupancy vs B factor for all ligands"""
 
+    plt.title("{} {}".format(protein_name, compound))
     plt.xlabel("Occupancy")
     plt.ylabel("B Factor")
+    plt.xlim(0, 1)
 
     all_occ_b_df = pd.DataFrame(columns=["Atom", "Occupancy", "B_factor"])
 
@@ -223,7 +270,9 @@ def b_occ_scatter(repeat_xtal_csv_path, params):
     m, b = np.polyfit(all_occ_b_df.Occupancy, all_occ_b_df.B_factor, 1)
     plt.plot(all_occ_b_df.Occupancy, m * all_occ_b_df.Occupancy + b, '-')
 
-    plt.savefig("b_occ.png", dpi=params.options.plot_dpi)
+    file_path = os.path.join(params.output.out_dir, protein_name, compound, "b_occ.png")
+
+    plt.savefig(file_path, dpi=params.options.plot_dpi)
     plt.close()
 
 
@@ -260,21 +309,33 @@ def run(params):
     if not os.path.exists(params.output.out_dir):
         os.mkdir(params.output.out_dir)
 
+    protein_name = get_protein_name(params)
+
+    # Make directory for each protein
+    if not os.path.exists(os.path.join(params.output.out_dir, protein_name)):
+        os.mkdir(os.path.join(params.output.out_dir, protein_name))
+
     # Loop over all compounds in database with more than params.options.min_repeat
     # If the compounds have bound conformations, generate plots to show occupancy
 
-    # TODO Add discrete folders for each compound output
     # TODO Add ability to loop over multiple database files
-    # TODO Add naming of
+    # TODO Add flag to not rerun data already collected
+    # TODO Add remote connection to diamond, so can be run/ developed without diamond access
 
-    for compound_csv, compound in detect_repeat_soaks(params):
+    for compound_csv, compound in detect_repeat_soaks(protein_name, params):
+
+        # Make directory for each compound
+        if not os.path.exists(os.path.join(params.output.out_dir, protein_name, compound)):
+            os.mkdir(os.path.join(params.output.out_dir, protein_name, compound))
+
         if repeat_soak_has_bound_conformation(compound_csv):
+            print "Generating plots for {} with {} bound".format(protein_name, compound)
             all_ligand_occupancy = all_lig_occ(compound_csv, params)
-            occupancy_histogram(compound, all_ligand_occupancy, params)
-            b_atom_plot(compound_csv, params)
-            b_occ_scatter(compound_csv, params)
+            occupancy_histogram(protein_name, compound, all_ligand_occupancy, params)
+            b_atom_plot(protein_name, compound, compound_csv, params)
+            b_occ_scatter(protein_name, compound, compound_csv, params)
         else:
-            print "Repeat Soak with {} has no bound conformations".format(compound)
+            print "{} Repeat Soak with {} has no bound conformations".format(protein_name, compound)
 
 
 if __name__ == '__main__':
