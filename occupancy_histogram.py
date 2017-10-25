@@ -38,6 +38,8 @@ options{
         .type = int 
     plot_dpi = 300
         .type = float
+    resolution_limit = 4.0
+        .type = float
 }
 """, process_includes=True)
 
@@ -208,8 +210,6 @@ def all_lig_occ(repeat_xtal_csv_path, params):
 
     return all_lig_occupancy
 
-
-# TODO Add protein name to title of plot
 def occupancy_histogram(protein_name, compound, all_lig_occupancy, params):
     """Use Occupancy dataframes to generate histogram"""
 
@@ -298,7 +298,70 @@ def occupancy_soak_time():
 def refinement_vs_exhaustive():
     pass
 
+# TODO Plots comparing the attempted repeat soak with reason for failure
+def get_soaked_crystals(compound,params):
 
+    # Open connection to sqlite database
+    conn = sqlite3.connect(params.input.database_path)
+    cur = conn.cursor()
+
+    # Get number of soak attempts
+    cur.execute("SELECT crystalName From mainTable WHERE compoundCode == ?", (compound,))
+    soak_attempts = cur.fetchall()
+    num_soak_attempts = len(soak_attempts)
+    num_failed_soaks = 0
+    for crystal in soak_attempts:
+        if crystal[0] == u'':
+            num_failed_soaks += 1
+    num_soaks = num_soak_attempts - num_failed_soaks
+
+    # Get number of diffracting xtals
+    cur.execute("SELECT DimpleResolutionHigh FROM mainTable WHERE compoundCode == ? AND" 
+                " DimpleResolutionHigh IS NOT NULL AND DimpleResolutionHigh < ?",
+                (compound,params.options.resolution_limit,))
+    diffracting_xtals = cur.fetchall()
+    num_diffracting_xtals = len(diffracting_xtals)
+
+    # Get number of bound conformations & events
+    cur.execute("SELECT mainTable.RefinementBoundConformation FROM panddaTable, mainTable "
+                 "WHERE mainTable.CrystalName = panddaTable.CrystalName AND compoundCode == ?", (compound,))
+    events = cur.fetchall()
+    num_events = len(events)
+    num_failed_events = 0
+    if num_events != 0:
+        for event in events:
+            if event[0] == None:
+                num_failed_events +=1
+    num_bound_events = num_events-num_failed_events
+
+    # Close connection to the database
+    cur.close()
+
+    return [num_soak_attempts, num_soaks, num_diffracting_xtals, num_events, num_bound_events]
+
+
+def soak_failure_bar_chart(protein_name,compound,params):
+
+    repeat_soak_numbers = get_soaked_crystals(compound,params)
+    N = len(repeat_soak_numbers)
+    x = range(N)
+    width = 0.75
+    plt.bar(x,repeat_soak_numbers,width, color ="green")
+
+    labels = ("Soak Attempts", "Successful Soaks", "Xtals diffracting to < {} Angstrom".format(compound),
+              "Xtals with events", "Xtals with bound conformations")
+
+    fig, ax = plt.subplots()
+
+    plt.title("{} {}".format(protein_name, compound))
+    plt.ylabel("Number of Xtals")
+    ax.set_xticklabels(labels)
+
+    file_path = os.path.join(params.output.out_dir, protein_name, compound, "soak_failure.png")
+    plt.savefig(file_path, dpi=params.options.plot_dpi)
+    plt.close()
+
+# TODO Decide whether report is needed
 def html_report():
     """ Generate a HTML report based on repeat soak information"""
     pass
@@ -330,6 +393,7 @@ def run(params):
 
         if repeat_soak_has_bound_conformation(compound_csv):
             print "Generating plots for {} with {} bound".format(protein_name, compound)
+            soak_failure_bar_chart(protein_name, compound, params)
             all_ligand_occupancy = all_lig_occ(compound_csv, params)
             occupancy_histogram(protein_name, compound, all_ligand_occupancy, params)
             b_atom_plot(protein_name, compound, compound_csv, params)
