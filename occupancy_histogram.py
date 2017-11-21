@@ -46,10 +46,16 @@ options{
 
 ##############################################################
 
+# TODO Write a way to copy files out from database/ file structure to be minimal testing set on Zambezi & home PC
+
 
 def append_multiple_databases():
     pass
 
+
+# If we use Refinement bound conformation, then we are ignoring the pandda refinement into a merged model. This is
+# ok for checking occupancy, but problematic as soon as we want to run things like edstats on the model. If we use
+# refinement pdb then we need to deal with the multiple copies of the ligand problem.
 
 def detect_repeat_soaks(protein_name, params):
     """ From XCE SQL database detect which ligands are repeated. Output to CSV."""
@@ -75,13 +81,16 @@ def detect_repeat_soaks(protein_name, params):
         elif compound[0] is u'':
             continue
         else:
-            cur.execute("SELECT CompoundSMILES, CrystalName, RefinementBoundConformation FROM mainTable WHERE "
+            cur.execute("SELECT CompoundSMILES, CrystalName, RefinementBoundConformation, RefinementPDB_latest,"
+                        "RefinementMTZ_latest  FROM mainTable WHERE "
                         "CompoundSMILES == ?", (compound[0],))
             repeat_xtals = cur.fetchall()
 
             # Output: CSV(s) that contains repeat soaks
             repeat_xtals_df = pd.DataFrame(repeat_xtals, columns=["CompoundSMILES", "CrystalName",
-                                                                  "RefinementBoundConformation"])
+                                                                  "RefinementBoundConformation",
+                                                                  "RefinementPDB_latest",
+                                                                  "RefinementMTZ_latest"])
             file_name = str(compound[1]) + '.csv'
             file_path = os.path.join(params.output.out_dir, protein_name, file_name)
             repeat_xtals_df.to_csv(file_path)
@@ -93,7 +102,7 @@ def detect_repeat_soaks(protein_name, params):
 
 
 def get_protein_name(params):
-    """ Get protein name from database. Check datbase has only one protein in it"""
+    """ Get protein name from database. Check database has only one protein in it"""
 
     # Open connection to sqlite database
     conn = sqlite3.connect(params.input.database_path)
@@ -192,6 +201,17 @@ def get_occupancy_b_df(repeat_xtal_csv_path, params):
 
         yield occ_b_df
 
+def get_pdb_mtz_name(repeat_xtal_csv_path, params):
+    """ Get refienement pdb path and mtz path from csv"""
+
+    repeat_xtal_df = pd.read_csv(repeat_xtal_csv_path, header=0)
+    repeat_xtal_clean = repeat_xtal_df.dropna()
+    for index, row in repeat_xtal_clean.iterrows():
+        pdb_path = row['RefinementPDB_latest']
+        mtz_path = row['RefinementMTZ_latest']
+        xtal_name = row['CrystalName']
+
+        yield pdb_path,mtz_path, xtal_name
 
 def all_lig_occ(repeat_xtal_csv_path, params):
     """ Get all ligands occupancy for a single repeat soak"""
@@ -366,6 +386,54 @@ def html_report():
     """ Generate a HTML report based on repeat soak information"""
     pass
 
+def edstats_RSR(xtal_name,mtz_file_path, pdb_file_path,pandda_lig_chain):
+    """ Temporary function from exhaustive search to run and generate RSR plots using edstats"""
+
+    # TODO Replace with more general form, splitting out plotting to a seperate fucntion
+
+    # Running Edstats
+    edstats, summary = ed.score_file_with_edstats(mtz_file_path,pdb_file_path)
+
+    edstats.scores.to_csv("edstat_{}.csv".format(xtal_name))
+
+    # Splitting RSR score into required chain
+    RSR_chain = edstats.scores.loc['Ra', (slice(None), pandda_lig_chain, slice(None), slice(None))]
+    ordered_chain = RSR_chain.sort_index(level=2)
+
+    # TODO Make plotting into function.
+    # TODO Generalise for residue and mean mode.
+    # TODO Generalise for other residue metrics
+    # Plotting of RSR vs residue for one chain
+    fig = plt.figure()
+    plt.plot(ordered_chain.index.get_level_values(2).values, ordered_chain.values)
+    plt.ylabel("RSR")
+    plt.xlabel("Residue Number")
+    plt.savefig("RSR_{}",format(xtal_name))
+    plt.close()
+
+    return edstats.scores
+
+def collate_edstats(repeat_xtal_csv_path, params):
+    """ Get edstats results from all xtals in a repeat soak"""
+
+    all_edstats_scores_list = []
+    xtal_names = []
+    for pdb, mtz, xtal_name in get_pdb_mtz_name(repeat_xtal_csv_path, params):
+
+        pandda_lig_chain = get_pandda_lig_chain(pdb, params)
+        edstats_scores = edstats_RSR(xtal_name,mtz_file_path, pdb_file_path,pandda_lig_chain)
+        all_edstats_scores_list.append(edstats_scores)
+        xtal_names.append(xtal_name)
+        print xtal_name
+
+    #all_edstats_scores = pd.concat(all_edstats_scores_list, axis = 1, keys = xtal_names)
+    #return all_edstats_scores
+
+def plot_mean_RSR(all_edstats_scores):
+    """ Given a dataframe containing multiple xtal edstats scores return a mean RSR plot"""
+
+    print all_edstats_scores
+
 
 def run(params):
     # Make directory for output, if it doesn't exist
@@ -384,9 +452,13 @@ def run(params):
     # TODO Add ability to loop over multiple database files
     # TODO Add flag to not rerun data already collected
     # TODO Add remote connection to diamond, so can be run/ developed without diamond access
+    # TODO Add ability to detect whether file exist, and and a overwrite parameter to make stuff anyways
 
     for compound_csv, compound in detect_repeat_soaks(protein_name, params):
 
+        all_edstats_scores = collate_edstats(compound_csv, params)
+        plot_mean_RSR(all_edstats_scores)
+        """
         # Make directory for each compound
         if not os.path.exists(os.path.join(params.output.out_dir, protein_name, compound)):
             os.mkdir(os.path.join(params.output.out_dir, protein_name, compound))
@@ -401,7 +473,10 @@ def run(params):
         else:
             print "{} Repeat Soak with {} has no bound conformations".format(protein_name, compound)
 
+        for xtal_name in xtal_names:
 
+            edstats_RSR(xtal_name, mtz_file_path, pdb_file_path, pandda_lig_chain)
+        """
 if __name__ == '__main__':
     run_default(
         run=run,
