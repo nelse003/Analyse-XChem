@@ -11,7 +11,7 @@ import matplotlib
 # TODO Set up alternate simpler run script (not giant.jiffies.run_default)
 
 from giant.jiffies import run_default
-
+import giant.xray.edstats as ed
 ##############################################################
 
 PROGRAM = 'occupancy_report'
@@ -40,6 +40,8 @@ options{
         .type = float
     resolution_limit = 4.0
         .type = float
+    overwrite = False
+        .type = bool
 }
 """, process_includes=True)
 
@@ -47,7 +49,6 @@ options{
 ##############################################################
 
 # TODO Write a way to copy files out from database/ file structure to be minimal testing set on Zambezi & home PC
-
 
 def append_multiple_databases():
     pass
@@ -92,7 +93,7 @@ def detect_repeat_soaks(protein_name, params):
                                                                   "RefinementPDB_latest",
                                                                   "RefinementMTZ_latest"])
             file_name = str(compound[1]) + '.csv'
-            file_path = os.path.join(params.output.out_dir, protein_name, file_name)
+            file_path = os.path.join(params.output.out_dir, protein_name,  file_name)
             repeat_xtals_df.to_csv(file_path)
 
             yield file_path, compound[1]
@@ -133,7 +134,20 @@ def get_protein_name(params):
 
 def repeat_soak_has_bound_conformation(repeat_xtal_csv_path):
     """ Return Boolean based on whether repeat soak has any bound conformations"""
+
     repeat_xtal_df = pd.read_csv(repeat_xtal_csv_path, header=0)
+
+    # Check that pdb files exist
+    for pdb in repeat_xtal_df.dropna()["RefinementBoundConformation"]:
+        os.path.exists(pdb)
+        print "PDB file at {} does not exist".format(pdb)
+        return False
+
+    for pdb in repeat_xtal_df.dropna()["RefinementPDB_latest"]:
+        os.path.exists(pdb)
+        print "PDB file at {} does not exist".format(pdb)
+        return False
+
     # Return False if repeat xtal dataframe is empty once NaN rows are removed
     return not repeat_xtal_df.dropna().empty
 
@@ -143,22 +157,27 @@ def get_pandda_lig_chain(pdb_path, params):
     conn = sqlite3.connect(params.input.database_path)
     cur = conn.cursor()
 
-    # Get crystal name given pdb path
+    # Get crystal name given pdb path (can use split.bound or refine)
     cur.execute("SELECT CrystalName FROM mainTable WHERE RefinementBoundConformation == ?", (pdb_path,))
     xtal_name = cur.fetchall()
+    if not xtal_name:
+        cur.execute("SELECT CrystalName FROM mainTable WHERE RefinementPDB_latest == ?", (pdb_path,))
+        xtal_name = cur.fetchall()
 
     # Get ligand chain given crystal name
     cur.execute("SELECT PANDDA_site_ligand_chain FROM panddaTable WHERE CrystalName == ?", xtal_name[0])
     pandda_lig_chain = cur.fetchall()
-
     # Close connection to sqlite database
     cur.close()
 
-    # convert from list of tuple, to value
-    pandda_lig_chain = pandda_lig_chain[0]
-    pandda_lig_chain = pandda_lig_chain[0]
-
-    return pandda_lig_chain
+    if pandda_lig_chain:
+        # convert from list of tuple, to value
+        pandda_lig_chain = pandda_lig_chain[0]
+        pandda_lig_chain = pandda_lig_chain[0]
+        return pandda_lig_chain
+    else:
+        print "{} at {} does not appear to have a pandda ligand chain,".format(xtal_name, pdb_path)
+        print "perhaps your datasource is pointing to the wrong file?"
 
 
 def read_ligand_occupancy_b(pdb_path, params):
@@ -201,6 +220,7 @@ def get_occupancy_b_df(repeat_xtal_csv_path, params):
 
         yield occ_b_df
 
+
 def get_pdb_mtz_name(repeat_xtal_csv_path, params):
     """ Get refienement pdb path and mtz path from csv"""
 
@@ -212,6 +232,7 @@ def get_pdb_mtz_name(repeat_xtal_csv_path, params):
         xtal_name = row['CrystalName']
 
         yield pdb_path,mtz_path, xtal_name
+
 
 def all_lig_occ(repeat_xtal_csv_path, params):
     """ Get all ligands occupancy for a single repeat soak"""
@@ -229,6 +250,7 @@ def all_lig_occ(repeat_xtal_csv_path, params):
             exit()
 
     return all_lig_occupancy
+
 
 def occupancy_histogram(protein_name, compound, all_lig_occupancy, params):
     """Use Occupancy dataframes to generate histogram"""
@@ -318,6 +340,7 @@ def occupancy_soak_time():
 def refinement_vs_exhaustive():
     pass
 
+
 # TODO Plots comparing the attempted repeat soak with reason for failure
 def get_soaked_crystals(compound,params):
 
@@ -381,58 +404,130 @@ def soak_failure_bar_chart(protein_name,compound,params):
     plt.savefig(file_path, dpi=params.options.plot_dpi)
     plt.close()
 
+
 # TODO Decide whether report is needed
 def html_report():
     """ Generate a HTML report based on repeat soak information"""
     pass
 
-def edstats_RSR(xtal_name,mtz_file_path, pdb_file_path,pandda_lig_chain):
-    """ Temporary function from exhaustive search to run and generate RSR plots using edstats"""
 
-    # TODO Replace with more general form, splitting out plotting to a seperate fucntion
+def edstats(mtz_file_path, pdb_file_path, edstats_csv_path):
+    """ Run Edstats on a single file"""
 
     # Running Edstats
     edstats, summary = ed.score_file_with_edstats(mtz_file_path,pdb_file_path)
+    edstats.scores.to_csv(edstats_csv_path)
 
-    edstats.scores.to_csv("edstat_{}.csv".format(xtal_name))
+    yield edstats.scores
 
+def residue_plot_edstats(edstats_scores, key, ylabel, protein_name, compound, xtal_name, params):
+
+    # TODO Replace with more general form, splitting out plotting to a seperate fucntion
+    # TODO Replace "A" with pulling out chains of the protein
     # Splitting RSR score into required chain
-    RSR_chain = edstats.scores.loc['Ra', (slice(None), pandda_lig_chain, slice(None), slice(None))]
-    ordered_chain = RSR_chain.sort_index(level=2)
+    main_chain = edstats_scores.loc[key, (slice(None), "A", slice(None), slice(None))]
+    ordered_chain = main_chain.sort_index(level=2)
 
-    # TODO Make plotting into function.
-    # TODO Generalise for residue and mean mode.
-    # TODO Generalise for other residue metrics
-    # Plotting of RSR vs residue for one chain
+    # Plotting of edstats row vs residue for one chain
     fig = plt.figure()
     plt.plot(ordered_chain.index.get_level_values(2).values, ordered_chain.values)
-    plt.ylabel("RSR")
+    plt.ylabel(ylabel)
     plt.xlabel("Residue Number")
-    plt.savefig("RSR_{}",format(xtal_name))
+    img_file_path = os.path.join(params.output.out_dir, protein_name, compound,
+                                 "{}_{}".format(ylabel.replace(' ','_'),xtal_name))
+    plt.savefig(img_file_path, dpi = params.options.plot_dpi)
     plt.close()
 
-    return edstats.scores
 
-def collate_edstats(repeat_xtal_csv_path, params):
+def collate_edstats(repeat_xtal_csv_path, compound_name, protein_name, params):
     """ Get edstats results from all xtals in a repeat soak"""
 
     all_edstats_scores_list = []
     xtal_names = []
+    lig_check = set()
+
     for pdb, mtz, xtal_name in get_pdb_mtz_name(repeat_xtal_csv_path, params):
+        edstats_csv_path = os.path.join(params.output.out_dir, protein_name,
+                                        compound_name, "edstat_{}.csv".format(xtal_name))
+        for edstats_scores in edstats(mtz, pdb, edstats_csv_path):
+            all_edstats_scores_list.append(edstats_scores)
 
-        pandda_lig_chain = get_pandda_lig_chain(pdb, params)
-        edstats_scores = edstats_RSR(xtal_name,mtz_file_path, pdb_file_path,pandda_lig_chain)
-        all_edstats_scores_list.append(edstats_scores)
+            # TODO Move these plots to a loop over the ouputted csv file
+            residue_plot_edstats(edstats_scores, 'Ra', 'RSR',protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'BAa', 'Mean residue B factor', protein_name, compound_name, xtal_name,params)
+            residue_plot_edstats(edstats_scores, 'CCPa', 'RSCC (population)',protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'CCSa', 'RSCC (sample)',protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'ZDa', 'RSZD',protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'ZOa', 'RSZO',protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'ZD+a', 'RSZD+',protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'ZD+a', 'RSZD-',protein_name, compound_name, xtal_name, params)
+
         xtal_names.append(xtal_name)
-        print xtal_name
+        pandda_lig_chain = get_pandda_lig_chain(pdb,params)
+        lig_check.add(pandda_lig_chain)
 
-    #all_edstats_scores = pd.concat(all_edstats_scores_list, axis = 1, keys = xtal_names)
-    #return all_edstats_scores
+    if len(lig_check) == 1:
+        pass
+    elif len(lig_check) == 0:
+        print " No ligand chains are present?"
+        return
+    else:
+        print lig_check
+        print "Ligand is not in same chain for all pdbs"
+        return
 
-def plot_mean_RSR(all_edstats_scores):
+    try:
+        all_edstats_scores = pd.concat(all_edstats_scores_list, axis = 1, keys = xtal_names)
+        file_path = os.path.join(params.output.out_dir, protein_name, compound_name,
+                                 "all_edstats_{}.csv".format(compound_name))
+        all_edstats_scores.to_csv(file_path)
+        return lig_check, all_edstats_scores
+
+    # TODO Make this handle the correct exception, rather than generic
+    except Exception:
+        print "No edstats calculated when bound conformation does not exist"
+
+
+# TODO make general to plot any parameter sorted in edstats
+def plot_mean_RSR(all_edstats_scores, protein_name, compound, pandda_lig_chain, params):
     """ Given a dataframe containing multiple xtal edstats scores return a mean RSR plot"""
 
-    print all_edstats_scores
+    # TODO Replace selection of "A" chain by something that find protein chains.
+
+    img_file_path = os.path.join(params.output.out_dir, protein_name, compound, "RSR_Mean")
+
+    if all_edstats_scores is not None:
+
+        RSR_chain = all_edstats_scores.loc['Ra', (slice(None),slice(None), "A", slice(None), slice(None))]
+        RSR_chain = RSR_chain.sort_index(level=2)
+
+        fig = plt.figure()
+        plt.plot(np.sort(RSR_chain.index.get_level_values(level = 3).unique()), RSR_chain.groupby(level = 3).mean().values)
+        plt.fill_between(np.sort(RSR_chain.index.get_level_values(level = 3).unique()),
+                         RSR_chain.groupby(level=3).mean().values - RSR_chain.groupby(level = 3).std().values,
+                         RSR_chain.groupby(level=3).mean().values + RSR_chain.groupby(level = 3).std().values,
+                         alpha=0.2)
+        plt.ylabel("RSR")
+        plt.xlabel("Residue Number")
+
+
+
+        lig_chain = str(pandda_lig_chain.pop())
+
+        # If ligand chain cannot be pulled out from the edstats scores, then finish the plot without the ligand
+        try:
+            RSR_LIG = all_edstats_scores.loc['Ra', (slice(None),slice(None), lig_chain, slice(None), slice(None))]
+        except Exception as error_inst:
+            print "Ligand extaction failing: {}".format(error_inst)
+            plt.savefig(img_file_path, dpi=params.options.plot_dpi)
+            plt.close()
+            return
+
+        # TODO find way to plot near the closest residue.
+        # Also consider a plot which takes the residues within nAng of ligand?
+        plt.errorbar(x = 250,y = RSR_LIG.mean(), yerr = RSR_LIG.std(), fmt='o' )
+        plt.savefig(img_file_path, dpi = params.options.plot_dpi)
+        plt.close()
 
 
 def run(params):
@@ -456,10 +551,33 @@ def run(params):
 
     for compound_csv, compound in detect_repeat_soaks(protein_name, params):
 
-        all_edstats_scores = collate_edstats(compound_csv, params)
-        plot_mean_RSR(all_edstats_scores)
+        # TODO fix If/else wrapper to loading csv, the multilevel index is not loading well from the csv
+        edstats_path = os.path.join(params.output.out_dir, protein_name, compound,"all_edstats_{}.csv".format(compound))
+
+        try:
+            pandda_lig_chain, all_edstats_scores = collate_edstats(compound_csv, compound, protein_name, params)
+        except TypeError as error_inst:
+            print "A type error has occured \n {} , ".format(error_inst)
+            print "likely due to collate_edstats failing, perhaps due to ligand chain not being supplied"
+            continue
+
+        plot_mean_RSR(all_edstats_scores, protein_name, compound, pandda_lig_chain, params)
+
+        """"
+        print all_edstats_scores
+        if os.path.exists(edstats_path):
+            all_edstats_scores = pd.read_csv(edstats_path, index_col=[0], header=[0,1,2,3,4])
+        else:
+            all_edstats_scores = collate_edstats(compound_csv, compound, protein_name, params)
         """
-        # Make directory for each compound
+
+        """
+        try:
+            plot_mean_RSR(all_edstats_scores)
+        except:
+            continue
+        """
+        """"# Make directory for each compound
         if not os.path.exists(os.path.join(params.output.out_dir, protein_name, compound)):
             os.mkdir(os.path.join(params.output.out_dir, protein_name, compound))
 
@@ -472,10 +590,6 @@ def run(params):
             b_occ_scatter(protein_name, compound, compound_csv, params)
         else:
             print "{} Repeat Soak with {} has no bound conformations".format(protein_name, compound)
-
-        for xtal_name in xtal_names:
-
-            edstats_RSR(xtal_name, mtz_file_path, pdb_file_path, pandda_lig_chain)
         """
 if __name__ == '__main__':
     run_default(
