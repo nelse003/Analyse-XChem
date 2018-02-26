@@ -2,16 +2,20 @@ import sqlite3
 import os
 import sys
 import pandas as pd
+import iotbx
 from iotbx.pdb import hierarchy
 import libtbx.phil
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
+import csv
+
 
 # TODO Set up alternate simpler run script (not giant.jiffies.run_default)
 
 from giant.jiffies import run_default
 import giant.xray.edstats as ed
+
 ##############################################################
 
 PROGRAM = 'occupancy_report'
@@ -90,15 +94,15 @@ def detect_repeat_soaks(protein_name, params):
                 pass
             else:
                 cur.execute("SELECT CompoundSMILES, CrystalName, RefinementBoundConformation, RefinementPDB_latest,"
-                        "RefinementMTZ_latest  FROM mainTable WHERE "
-                        "CompoundSMILES == ?", (compound[0],))
+                            "RefinementMTZ_latest  FROM mainTable WHERE "
+                            "CompoundSMILES == ?", (compound[0],))
                 repeat_xtals = cur.fetchall()
 
                 # Output: CSV(s) that contains repeat soaks
                 repeat_xtals_df = pd.DataFrame(repeat_xtals, columns=["CompoundSMILES", "CrystalName",
-                                                                  "RefinementBoundConformation",
-                                                                  "RefinementPDB_latest",
-                                                                  "RefinementMTZ_latest"])
+                                                                      "RefinementBoundConformation",
+                                                                      "RefinementPDB_latest",
+                                                                      "RefinementMTZ_latest"])
                 repeat_xtals_df.to_csv(file_path)
 
             yield file_path, compound[1]
@@ -106,7 +110,8 @@ def detect_repeat_soaks(protein_name, params):
     # Close connection to the database
     cur.close()
 
-def detect_apo_dimple(repeat_xtal_csv_path,params):
+
+def detect_apo_dimple(repeat_xtal_csv_path, params):
     """ From XCE SQL database detect apo (dimple) structures. Output to CSV, return csv_filepath"""
 
     file_path = os.path.join(os.path.dirname(repeat_xtal_csv_path), "apo_dimple.csv")
@@ -127,7 +132,7 @@ def detect_apo_dimple(repeat_xtal_csv_path,params):
             cur.execute("SELECT DimplePANDDApath FROM mainTable WHERE CrystalName == ?", (xtal_name,))
             pandda_dir = cur.fetchall()
 
-            if any("ccp4" in file for file in os.listdir(pandda_dir[0][0].encode('ascii','ignore'))):
+            if any("ccp4" in file for file in os.listdir(pandda_dir[0][0].encode('ascii', 'ignore'))):
                 repeat_xtal_clean.drop(repeat_xtal_clean.index(index))
 
         repeat_xtal_clean.to_csv(file_path)
@@ -136,7 +141,6 @@ def detect_apo_dimple(repeat_xtal_csv_path,params):
 
 
 def detect_all_dimple(params):
-
     """ From XCE SQL database detect all (dimple) structures. Output to CSV, return csv"""
 
     protein_name = get_protein_name(params)
@@ -156,6 +160,7 @@ def detect_all_dimple(params):
         repeat_xtals_df.to_csv(file_path)
 
     return file_path
+
 
 def get_protein_name(params):
     """ Get protein name from database. Check database has only one protein in it"""
@@ -207,7 +212,7 @@ def repeat_soak_has_bound_conformation(repeat_xtal_csv_path):
     return not repeat_xtal_df.dropna().empty
 
 
-def get_pandda_lig_chain(pdb_path, params):
+def get_pandda_or_any_lig_chain(pdb_path, params):
     # Open connection to sqlite database
     conn = sqlite3.connect(params.input.database_path)
     cur = conn.cursor()
@@ -215,24 +220,48 @@ def get_pandda_lig_chain(pdb_path, params):
     # Get crystal name given pdb path (can use split.bound or refine)
     cur.execute("SELECT CrystalName FROM mainTable WHERE RefinementBoundConformation == ?", (pdb_path,))
     xtal_name = cur.fetchall()
+
+    pdb_inp = iotbx.pdb.input(pdb_path)
+    hier = pdb_inp.construct_hierarchy()
+    pdb_atoms = hier.atoms()
+
+    sel_cache = hier.atom_selection_cache()
+    resnames = ['DRG', 'FRG', 'LIG', 'UNK', 'UNL']
+    lig_chain = set()
+    for resname in resnames:
+        selection_string = "resname {}".format(resname)
+        altloc_selection = sel_cache.selection(selection_string)
+        altloc_atoms = pdb_atoms.select(altloc_selection)
+        for atom in altloc_atoms:
+            lig_chain.add(atom.parent().parent().parent().id)
+
     if not xtal_name:
         cur.execute("SELECT CrystalName FROM mainTable WHERE RefinementPDB_latest == ?", (pdb_path,))
         xtal_name = cur.fetchall()
 
-    # Get ligand chain given crystal name
-    cur.execute("SELECT PANDDA_site_ligand_chain FROM panddaTable WHERE CrystalName == ?", xtal_name[0])
-    pandda_lig_chain = cur.fetchall()
-    # Close connection to sqlite database
-    cur.close()
+    if len(xtal_name) != 0:
+        # Get ligand chain given crystal name
+        cur.execute("SELECT PANDDA_site_ligand_chain FROM panddaTable WHERE CrystalName == ?", xtal_name[0])
+        pandda_lig_chain = cur.fetchall()
+        # Close connection to sqlite database
+        cur.close()
 
-    if pandda_lig_chain:
-        # convert from list of tuple, to value
-        pandda_lig_chain = pandda_lig_chain[0]
-        pandda_lig_chain = pandda_lig_chain[0]
-        return pandda_lig_chain
+        if pandda_lig_chain:
+            # convert from list of tuple, to value
+            pandda_lig_chain = pandda_lig_chain[0]
+            pandda_lig_chain = pandda_lig_chain[0]
+            return pandda_lig_chain
+
+        elif lig_chain:
+            print("Dosen't have a pandda_lig_chain. using ligand chain {} anyway".format(list(lig_chain)))
+            return lig_chain[0]
+        else:
+            print "{} at {} does not appear to have a pandda ligand chain,".format(xtal_name, pdb_path)
+            print "perhaps your datasource is pointing to the wrong file?"
     else:
-        print "{} at {} does not appear to have a pandda ligand chain,".format(xtal_name, pdb_path)
-        print "perhaps your datasource is pointing to the wrong file?"
+        print "Xtal name does not exist. Using ligand chain instead {}".format(list(lig_chain)[0])
+        return list(lig_chain)[0]
+    cur.close()
 
 
 def read_ligand_occupancy_b(pdb_path, params):
@@ -243,13 +272,22 @@ def read_ligand_occupancy_b(pdb_path, params):
     # Output: Occupancy for ligand in supplied pdb. Dict including chain & altloc?
 
     # Get ligand chain that is associated with Event
-    pandda_lig_chain = get_pandda_lig_chain(pdb_path, params)
+    pandda_lig_chain = get_pandda_or_any_lig_chain(pdb_path, params)
+
+    # This should be the case when the dataset has not passed through pandda.export
+    if pandda_lig_chain is None:
+        return None
 
     # Read in single PDB file
+    print(pdb_path)
     pdb_in = hierarchy.input(file_name=pdb_path)
     sel_cache = pdb_in.hierarchy.atom_selection_cache()
     lig_sel = sel_cache.selection("chain {}".format(pandda_lig_chain))
     lig_hierarchy = pdb_in.hierarchy.select(lig_sel)
+
+    print("Pandda_lig_chain:".format(pandda_lig_chain))
+
+    print_hier_atoms(lig_hierarchy)
 
     lig_occ_b = []
     # Get occupancy & B factor of ligand
@@ -262,6 +300,32 @@ def read_ligand_occupancy_b(pdb_path, params):
     occ_b_df = pd.DataFrame(lig_occ_b, columns=["Atom", "Occupancy", "B_factor"])
 
     return occ_b_df
+
+
+def print_hier_atoms(hierarchy):
+    """
+    Basic printing of an iotbx.pdb.hierarchy
+
+    :param hierarchy: 
+    :return: 
+    """
+
+    for model in hierarchy.models():
+        print("Model: {}".format(model.id))
+
+        for chain in model.chains():
+            print("Chain: {}".format(chain.id))
+
+            for residue_group in chain.residue_groups():
+                print("Residue: {}".format(residue_group.resseq))
+
+                for atom_group in residue_group.atom_groups():
+                    print("Altloc: {}".format(atom_group.altloc))
+
+                    for atom in atom_group.atoms():
+                        print("Atom Name: {}".format(atom.name))
+
+    print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
 
 def get_occupancy_b_df(repeat_xtal_csv_path, params):
@@ -306,7 +370,13 @@ def all_lig_occ(repeat_xtal_csv_path, params):
     for occ_b_df in get_occupancy_b_df(repeat_xtal_csv_path, params):
         # Check whether the ligand has a single occupancy value
         # TODO Change to not rely on positional indexing of occupancy value, use column name
-        if occ_b_df.apply(lambda x: x.nunique())[1] == 1:
+
+        print(occ_b_df)
+
+        if occ_b_df is None:
+            print("Skipping Crystal,as it appears not to be exported via pandda.export")
+            continue
+        elif occ_b_df.apply(lambda x: x.nunique())[1] == 1:
             lig_occ = occ_b_df.loc("Occupancy")[0][1]
             all_lig_occupancy.append(lig_occ)
         else:
@@ -314,6 +384,7 @@ def all_lig_occ(repeat_xtal_csv_path, params):
             exit()
 
     return all_lig_occupancy
+
 
 
 def occupancy_histogram(protein_name, compound, all_lig_occupancy, params):
@@ -324,13 +395,72 @@ def occupancy_histogram(protein_name, compound, all_lig_occupancy, params):
         return
 
     plt.hist(all_lig_occupancy, rwidth=0.75)
-    plt.xlim(0, 1)
+    plt.xlim(0, 1.05)
     plt.title("Occupancy Histogram: {} : {}".format(protein_name, compound))
     plt.xlabel("Occupancy")
     plt.ylabel("Frequency")
 
     file_path = os.path.join(params.output.out_dir, protein_name, compound, "occ_hist.png")
 
+    plt.savefig(file_path, dpi=params.options.plot_dpi)
+    plt.close()
+
+
+def get_exhaustive_search_occ_given_compound(compound,exhaustive_search_csv_path, params):
+
+    conn = sqlite3.connect(params.input.database_path)
+    cur = conn.cursor()
+
+    # Get number of soak attempts
+    print(compound)
+    cur.execute("SELECT crystalName From mainTable WHERE compoundCode == ?", (compound,))
+    xtal_names = cur.fetchall()
+    cur.close()
+
+    xtal_names_list =[]
+
+    for xtal_name in xtal_names:
+        xtal_names_list.append(xtal_name[0].encode('ascii', 'ignore'))
+
+    occs = []
+    with open(exhaustive_search_csv_path) as csvfile:
+        readCSV = csv.reader(csvfile, delimiter=',')
+        for row in readCSV:
+            protein = row[0]
+            occ = row[1]
+            if protein in xtal_names_list:
+                occs.append(float(occ))
+
+    return occs
+
+
+def occupancy_histogram_with_exhaustive_search(protein_name, compound, all_lig_occupancy, exhaustive_search_csv_path,
+                                               params):
+    """Use Occupancy dataframes to generate histogram"""
+
+    occ = get_exhaustive_search_occ_given_compound(compound,exhaustive_search_csv_path, params)
+
+    print(len(occ))
+    print(occ)
+    print(len(all_lig_occupancy))
+    print(all_lig_occupancy)
+    occ_bins = np.linspace(0, 1, 21, endpoint=True)
+
+    fig, ax = plt.subplots()
+    ax.hist(occ, bins=occ_bins, width=0.04, color='r',  alpha=0.5,
+            label='Exhaustive search occupancy: {}'.format(len(occ)))
+    ax.hist(all_lig_occupancy,bins=occ_bins, width=0.04, color='b', alpha=0.5,
+            label='Refined occupancy: {}'.format(len(all_lig_occupancy)))
+    plt.xlim(0, 1.05)
+    ax.legend(loc='best',fontsize='small')
+
+    labels = ["Refined occupancy", "Exhasutive search occupancy"]
+
+    plt.title("Occupancy Histogram: {} : {}".format(protein_name, compound))
+    plt.xlabel("Occupancy")
+    plt.ylabel("Frequency")
+
+    file_path = os.path.join(params.output.out_dir,"occ_hist_with_exhaustive_{}_{}.png".format(protein_name,compound))
     plt.savefig(file_path, dpi=params.options.plot_dpi)
     plt.close()
 
@@ -351,6 +481,9 @@ def b_atom_plot(protein_name, compound, repeat_xtal_csv_path, params):
 
         colour = cmap(occ_b_df["Occupancy"].mean())
         plt.plot(occ_b_df.B_factor, c=colour)
+
+    cbar = fig.colorbar(ax, ticks=[0, 0.25, 0.5, 0.75, 1])
+    cbar.ax.set_yticklabels(['0', ' 1'])  # vertically oriented colorbar
 
     file_path = os.path.join(params.output.out_dir, protein_name, compound, "b_scatter.png")
 
@@ -406,8 +539,7 @@ def refinement_vs_exhaustive():
 
 
 # TODO Plots comparing the attempted repeat soak with reason for failure
-def get_soaked_crystals(compound,params):
-
+def get_soaked_crystals(compound, params):
     # Open connection to sqlite database
     conn = sqlite3.connect(params.input.database_path)
     cur = conn.cursor()
@@ -423,23 +555,23 @@ def get_soaked_crystals(compound,params):
     num_soaks = num_soak_attempts - num_failed_soaks
 
     # Get number of diffracting xtals
-    cur.execute("SELECT DimpleResolutionHigh FROM mainTable WHERE compoundCode == ? AND" 
+    cur.execute("SELECT DimpleResolutionHigh FROM mainTable WHERE compoundCode == ? AND"
                 " DimpleResolutionHigh IS NOT NULL AND DimpleResolutionHigh < ?",
-                (compound,params.options.resolution_limit,))
+                (compound, params.options.resolution_limit,))
     diffracting_xtals = cur.fetchall()
     num_diffracting_xtals = len(diffracting_xtals)
 
     # Get number of bound conformations & events
     cur.execute("SELECT mainTable.RefinementBoundConformation FROM panddaTable, mainTable "
-                 "WHERE mainTable.CrystalName = panddaTable.CrystalName AND compoundCode == ?", (compound,))
+                "WHERE mainTable.CrystalName = panddaTable.CrystalName AND compoundCode == ?", (compound,))
     events = cur.fetchall()
     num_events = len(events)
     num_failed_events = 0
     if num_events != 0:
         for event in events:
             if event[0] == None:
-                num_failed_events +=1
-    num_bound_events = num_events-num_failed_events
+                num_failed_events += 1
+    num_bound_events = num_events - num_failed_events
 
     # Close connection to the database
     cur.close()
@@ -447,13 +579,12 @@ def get_soaked_crystals(compound,params):
     return [num_soak_attempts, num_soaks, num_diffracting_xtals, num_events, num_bound_events]
 
 
-def soak_failure_bar_chart(protein_name,compound,params):
-
-    repeat_soak_numbers = get_soaked_crystals(compound,params)
+def soak_failure_bar_chart(protein_name, compound, params):
+    repeat_soak_numbers = get_soaked_crystals(compound, params)
     N = len(repeat_soak_numbers)
     x = range(N)
     width = 0.75
-    plt.bar(x,repeat_soak_numbers,width, color ="green")
+    plt.bar(x, repeat_soak_numbers, width, color="green")
 
     labels = ("Soak Attempts", "Successful Soaks", "Xtals diffracting to < {} Angstrom".format(compound),
               "Xtals with events", "Xtals with bound conformations")
@@ -479,12 +610,12 @@ def edstats(mtz_file_path, pdb_file_path, edstats_csv_path):
     """ Run Edstats on a single file"""
 
     # Running Edstats
-    edstats, summary = ed.score_file_with_edstats(mtz_file_path,pdb_file_path)
+    edstats, summary = ed.score_file_with_edstats(mtz_file_path, pdb_file_path)
     edstats.scores.to_csv(edstats_csv_path)
 
     print edstats.scores
 
-    edstats_scores = pd.read_csv(edstats_csv_path, header=[0,1,2,3] , index_col=0)
+    edstats_scores = pd.read_csv(edstats_csv_path, header=[0, 1, 2, 3], index_col=0)
 
     print edstats_scores
     edstats_trans = edstats_scores.transpose()
@@ -493,13 +624,12 @@ def edstats(mtz_file_path, pdb_file_path, edstats_csv_path):
     from pandas.util.testing import assert_frame_equal
     assert_frame_equal(edstats_scores, edstats.scores)
 
-
     sys.exit()
 
     yield edstats.scores
 
-def residue_plot_edstats(edstats_scores, key, ylabel, protein_name, compound, xtal_name, params):
 
+def residue_plot_edstats(edstats_scores, key, ylabel, protein_name, compound, xtal_name, params):
     # TODO Replace with more general form, splitting out plotting to a seperate fucntion
     # TODO Replace "A" with pulling out chains of the protein
     # Splitting score into required chain
@@ -512,8 +642,8 @@ def residue_plot_edstats(edstats_scores, key, ylabel, protein_name, compound, xt
     plt.ylabel(ylabel)
     plt.xlabel("Residue Number")
     img_file_path = os.path.join(params.output.out_dir, protein_name, compound,
-                                 "{}_{}".format(ylabel.replace(' ','_'),xtal_name))
-    plt.savefig(img_file_path, dpi = params.options.plot_dpi)
+                                 "{}_{}".format(ylabel.replace(' ', '_'), xtal_name))
+    plt.savefig(img_file_path, dpi=params.options.plot_dpi)
     plt.close()
 
 
@@ -531,18 +661,21 @@ def collate_edstats(repeat_xtal_csv_path, compound_name, protein_name, params, l
             all_edstats_scores_list.append(edstats_scores)
 
             # TODO Move these plots to a loop over the ouputted csv file
-            residue_plot_edstats(edstats_scores, 'Ra', 'RSR',protein_name, compound_name, xtal_name, params)
-            residue_plot_edstats(edstats_scores, 'BAa', 'Mean residue B factor', protein_name, compound_name, xtal_name,params)
-            residue_plot_edstats(edstats_scores, 'CCPa', 'RSCC (population)',protein_name, compound_name, xtal_name, params)
-            residue_plot_edstats(edstats_scores, 'CCSa', 'RSCC (sample)',protein_name, compound_name, xtal_name, params)
-            residue_plot_edstats(edstats_scores, 'ZDa', 'RSZD',protein_name, compound_name, xtal_name, params)
-            residue_plot_edstats(edstats_scores, 'ZOa', 'RSZO',protein_name, compound_name, xtal_name, params)
-            residue_plot_edstats(edstats_scores, 'ZD+a', 'RSZD+',protein_name, compound_name, xtal_name, params)
-            residue_plot_edstats(edstats_scores, 'ZD+a', 'RSZD-',protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'Ra', 'RSR', protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'BAa', 'Mean residue B factor', protein_name, compound_name, xtal_name,
+                                 params)
+            residue_plot_edstats(edstats_scores, 'CCPa', 'RSCC (population)', protein_name, compound_name, xtal_name,
+                                 params)
+            residue_plot_edstats(edstats_scores, 'CCSa', 'RSCC (sample)', protein_name, compound_name, xtal_name,
+                                 params)
+            residue_plot_edstats(edstats_scores, 'ZDa', 'RSZD', protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'ZOa', 'RSZO', protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'ZD+a', 'RSZD+', protein_name, compound_name, xtal_name, params)
+            residue_plot_edstats(edstats_scores, 'ZD+a', 'RSZD-', protein_name, compound_name, xtal_name, params)
 
         xtal_names.append(xtal_name)
         if ligand_present:
-            pandda_lig_chain = get_pandda_lig_chain(pdb,params)
+            pandda_lig_chain = get_pandda_or_any_lig_chain(pdb, params)
             lig_check.add(pandda_lig_chain)
 
     if ligand_present:
@@ -559,7 +692,7 @@ def collate_edstats(repeat_xtal_csv_path, compound_name, protein_name, params, l
         lig_check = None
 
     try:
-        all_edstats_scores = pd.concat(all_edstats_scores_list, axis = 1, keys = xtal_names)
+        all_edstats_scores = pd.concat(all_edstats_scores_list, axis=1, keys=xtal_names)
         file_path = os.path.join(params.output.out_dir, protein_name, compound_name,
                                  "all_edstats_{}.csv".format(compound_name))
         all_edstats_scores.to_csv(file_path)
@@ -577,18 +710,19 @@ def summary_residue_plot(all_edstats_scores, key, ylabel, protein_name, compound
     # TODO Replace selection of "A" chain by something that find protein chains.
 
     img_file_path = os.path.join(params.output.out_dir, protein_name, compound,
-                                 "summary_{}".format(ylabel.replace(' ','_')))
+                                 "summary_{}".format(ylabel.replace(' ', '_')))
 
     if all_edstats_scores is not None:
 
-        metric = all_edstats_scores.loc[key, (slice(None),slice(None), "A", slice(None), slice(None))]
+        metric = all_edstats_scores.loc[key, (slice(None), slice(None), "A", slice(None), slice(None))]
         ordered_metric = metric.sort_index(level=2)
 
         fig = plt.figure()
-        plt.plot(np.sort(ordered_metric.index.get_level_values(level = 3).unique()), ordered_metric.groupby(level = 3).mean().values)
-        plt.fill_between(np.sort(ordered_metric.index.get_level_values(level = 3).unique()),
-                         ordered_metric.groupby(level=3).mean().values - ordered_metric.groupby(level = 3).std().values,
-                         ordered_metric.groupby(level=3).mean().values + ordered_metric.groupby(level = 3).std().values,
+        plt.plot(np.sort(ordered_metric.index.get_level_values(level=3).unique()),
+                 ordered_metric.groupby(level=3).mean().values)
+        plt.fill_between(np.sort(ordered_metric.index.get_level_values(level=3).unique()),
+                         ordered_metric.groupby(level=3).mean().values - ordered_metric.groupby(level=3).std().values,
+                         ordered_metric.groupby(level=3).mean().values + ordered_metric.groupby(level=3).std().values,
                          alpha=0.2)
         plt.ylabel(ylabel)
         plt.xlabel("Residue Number")
@@ -597,7 +731,7 @@ def summary_residue_plot(all_edstats_scores, key, ylabel, protein_name, compound
         # If ligand chain cannot be pulled out from the edstats scores, then finish the plot without the ligand
         try:
             lig_chain = str(pandda_lig_chain.pop())
-            metric_LIG = all_edstats_scores.loc[key, (slice(None),slice(None), "F", slice(None), slice(None))]
+            metric_LIG = all_edstats_scores.loc[key, (slice(None), slice(None), "F", slice(None), slice(None))]
         except Exception as error_inst:
             print "Ligand extraction failing: {}".format(error_inst)
             plt.savefig(img_file_path, dpi=params.options.plot_dpi)
@@ -606,114 +740,160 @@ def summary_residue_plot(all_edstats_scores, key, ylabel, protein_name, compound
 
         # TODO find way to plot near the closest residue.
         # Also consider a plot which takes the residues within nAng of ligand?
-        plt.errorbar(x = 250,y = metric_LIG.mean(), yerr = metric_LIG.std(), fmt='o' )
-        plt.savefig(img_file_path, dpi = params.options.plot_dpi)
+        plt.errorbar(x=250, y=metric_LIG.mean(), yerr=metric_LIG.std(), fmt='o')
+        plt.savefig(img_file_path, dpi=params.options.plot_dpi)
         plt.close()
 
 
 def run(params):
+
     # Make directory for output, if it doesn't exist
     if not os.path.exists(params.output.out_dir):
         os.mkdir(params.output.out_dir)
 
     protein_name = get_protein_name(params)
 
-    # Make directory for each protein
-    if not os.path.exists(os.path.join(params.output.out_dir, protein_name)):
-        os.mkdir(os.path.join(params.output.out_dir, protein_name))
-
-    all_dimple_path = detect_all_dimple(params)
-    apo_dimple_path  = detect_apo_dimple(all_dimple_path, params)
-    print apo_dimple_path
-
-    if not os.path.exists(os.path.join(params.output.out_dir, protein_name, "apo_dimple")):
-        os.mkdir(os.path.join(params.output.out_dir, protein_name, "apo_dimple"))
-
-    pandda_lig_chain, all_edstats_scores = collate_edstats(apo_dimple_path, "apo_dimple", protein_name, params, ligand_present = False)
-    summary_residue_plot(all_edstats_scores, 'Ra', 'RSR', protein_name, "apo_dimple", pandda_lig_chain, params)
-    summary_residue_plot(all_edstats_scores, 'BAa', 'Mean residue B factor', protein_name, "apo_dimple",
-                         pandda_lig_chain, params)
-    summary_residue_plot(all_edstats_scores, 'CCPa', 'RSCC (population)', protein_name, "apo_dimple",
-                         pandda_lig_chain, params)
-    summary_residue_plot(all_edstats_scores, 'CCSa', 'RSCC (sample)', protein_name, "apo_dimple",
-                         pandda_lig_chain, params)
-    summary_residue_plot(all_edstats_scores, 'ZDa', 'RSZD', protein_name, "apo_dimple", pandda_lig_chain,
-                         params)
-    summary_residue_plot(all_edstats_scores, 'ZOa', 'RSZO', protein_name, "apo_dimple", pandda_lig_chain,
-                         params)
-    summary_residue_plot(all_edstats_scores, 'ZD+a', 'RSZD+', protein_name, "apo_dimple", pandda_lig_chain,
-                         params)
-    summary_residue_plot(all_edstats_scores, 'ZD+a', 'RSZD-', protein_name, "apo_dimple", pandda_lig_chain,
-                         params)
-
-    sys.exit()
-
-
-    # Loop over all compounds in database with more than params.options.min_repeat
-    # If the compounds have bound conformations, generate plots to show occupancy
-
-    # TODO Add ability to loop over multiple database files
-    # TODO Add flag to not rerun data already collected
-    # TODO Add remote connection to diamond, so can be run/ developed without diamond access
-    # TODO Add ability to detect whether file exist, and and a overwrite parameter to make stuff anyways
 
     for compound_csv, compound in detect_repeat_soaks(protein_name, params):
-        # TODO Fix datasource before running with this check
-        #if repeat_soak_has_bound_conformation(compound_csv):
 
-            # TODO fix If/else wrapper to loading csv, the multilevel index is not loading well from the csv
+        compound_check=compound.replace(" ", "")
 
-        try:
-            pandda_lig_chain, all_edstats_scores = collate_edstats(compound_csv, compound, protein_name, params)
+        ###############################################################
+        # Code for getting alternate refined PDB (not in database location
+        refined_pdbs = []
+        for root, dirs, files in os.walk(
+                "/dls/science/groups/i04-1/elliot-dev/Work/exhaustive_search/occupancy_group_with_refinement"):
+            for file in files:
+                if file == "refine.pdb":
+                    for file_x in os.listdir(root):
+                        if file_x.endswith(".cif"):
+                            current_compound = file_x.rstrip(".cif")
+                            print(current_compound)
+                            if current_compound == compound_check:
+                                refined_pdbs.append(os.path.join(root, file))
 
-            summary_residue_plot(all_edstats_scores, 'Ra', 'RSR', protein_name, compound, pandda_lig_chain, params)
-            summary_residue_plot(all_edstats_scores, 'BAa', 'Mean residue B factor', protein_name, compound,
-                                 pandda_lig_chain, params)
-            summary_residue_plot(all_edstats_scores, 'CCPa', 'RSCC (population)', protein_name, compound,
-                                 pandda_lig_chain, params)
-            summary_residue_plot(all_edstats_scores, 'CCSa', 'RSCC (sample)', protein_name, compound,
-                                 pandda_lig_chain, params)
-            summary_residue_plot(all_edstats_scores, 'ZDa', 'RSZD', protein_name, compound, pandda_lig_chain,
-                                 params)
-            summary_residue_plot(all_edstats_scores, 'ZOa', 'RSZO', protein_name, compound, pandda_lig_chain,
-                                 params)
-            summary_residue_plot(all_edstats_scores, 'ZD+a', 'RSZD+', protein_name, compound, pandda_lig_chain,
-                                 params)
-            summary_residue_plot(all_edstats_scores, 'ZD+a', 'RSZD-', protein_name, compound, pandda_lig_chain,
-                                 params)
-        except TypeError as error_inst:
-            print "A type error has occured \n {} , ".format(error_inst)
-            print "likely due to collate_edstats failing, perhaps due to ligand chain not being supplied"
+        all_lig_occupancy = []
+        for pdb in refined_pdbs:
 
+            print(pdb)
+            occ_b_df = read_ligand_occupancy_b(pdb, params)
 
-        """"
-        print all_edstats_scores
-        if os.path.exists(edstats_path):
-            all_edstats_scores = pd.read_csv(edstats_path, index_col=[0], header=[0,1,2,3,4])
-        else:
-            all_edstats_scores = collate_edstats(compound_csv, compound, protein_name, params)
-        """
+            print(occ_b_df)
 
-        """
-        try:
-            plot_mean_RSR(all_edstats_scores)
-        except:
-            continue
-        """
-        """"# Make directory for each compound
-        if not os.path.exists(os.path.join(params.output.out_dir, protein_name, compound)):
-            os.mkdir(os.path.join(params.output.out_dir, protein_name, compound))
+            if occ_b_df is None:
+                print("Skipping Crystal,as it appears not to be exported via pandda.export")
+                continue
+            elif occ_b_df.apply(lambda x: x.nunique())[1] == 1:
+                lig_occ = occ_b_df.loc("Occupancy")[0][1]
+                all_lig_occupancy.append(lig_occ)
+            else:
+                print "Occupancy varies across ligand, histogram not currently generated"
 
+        print all_lig_occupancy
+        ##################################################################
+
+        exhaustive_search_csv_path = "/dls/science/groups/i04-1/elliot-dev/Work/exhaustive_search/min_occ_u_iso_NUDT22_with_refinement.csv"
+
+        # # Make directory for each compound
+        # if not os.path.exists(os.path.join(params.output.out_dir, protein_name, compound)):
+        #     os.mkdir(os.path.join(params.output.out_dir, protein_name, compound))
+        #
         if repeat_soak_has_bound_conformation(compound_csv):
             print "Generating plots for {} with {} bound".format(protein_name, compound)
-            soak_failure_bar_chart(protein_name, compound, params)
-            all_ligand_occupancy = all_lig_occ(compound_csv, params)
-            occupancy_histogram(protein_name, compound, all_ligand_occupancy, params)
-            b_atom_plot(protein_name, compound, compound_csv, params)
-            b_occ_scatter(protein_name, compound, compound_csv, params)
+            #     soak_failure_bar_chart(protein_name, compound, params)
+            #all_ligand_occupancy = all_lig_occ(compound_csv, params)
+            # occupancy_histogram(protein_name, compound, all_ligand_occupancy, params)
+            exhaustive_search_csv_path = "/dls/science/groups/i04-1/elliot-dev/Work/exhaustive_search/min_occ_u_iso_NUDT22_with_refinement.csv"
+            occupancy_histogram_with_exhaustive_search(protein_name, compound, all_lig_occupancy,
+                                                       exhaustive_search_csv_path, params)
+
+            #  occupancy_histogram_with_exhaustive_search(protein_name, compound, all_ligand_occupancy, exhaustive_search_csv_path, params)
+            # b_atom_plot(protein_name, compound, compound_csv, params)
+            # b_occ_scatter(protein_name, compound, compound_csv, params)
         else:
             print "{} Repeat Soak with {} has no bound conformations".format(protein_name, compound)
-        """
+        pass
+
+
+    # # Make directory for each protein
+    # if not os.path.exists(os.path.join(params.output.out_dir, protein_name)):
+    #     os.mkdir(os.path.join(params.output.out_dir, protein_name))
+    #
+    # all_dimple_path = detect_all_dimple(params)
+    # apo_dimple_path  = detect_apo_dimple(all_dimple_path, params)
+    # print apo_dimple_path
+    #
+    # if not os.path.exists(os.path.join(params.output.out_dir, protein_name, "apo_dimple")):
+    #     os.mkdir(os.path.join(params.output.out_dir, protein_name, "apo_dimple"))
+    #
+    # pandda_lig_chain, all_edstats_scores = collate_edstats(apo_dimple_path, "apo_dimple", protein_name, params, ligand_present = False)
+    # summary_residue_plot(all_edstats_scores, 'Ra', 'RSR', protein_name, "apo_dimple", pandda_lig_chain, params)
+    # summary_residue_plot(all_edstats_scores, 'BAa', 'Mean residue B factor', protein_name, "apo_dimple",
+    #                      pandda_lig_chain, params)
+    # summary_residue_plot(all_edstats_scores, 'CCPa', 'RSCC (population)', protein_name, "apo_dimple",
+    #                      pandda_lig_chain, params)
+    # summary_residue_plot(all_edstats_scores, 'CCSa', 'RSCC (sample)', protein_name, "apo_dimple",
+    #                      pandda_lig_chain, params)
+    # summary_residue_plot(all_edstats_scores, 'ZDa', 'RSZD', protein_name, "apo_dimple", pandda_lig_chain,
+    #                      params)
+    # summary_residue_plot(all_edstats_scores, 'ZOa', 'RSZO', protein_name, "apo_dimple", pandda_lig_chain,
+    #                      params)
+    # summary_residue_plot(all_edstats_scores, 'ZD+a', 'RSZD+', protein_name, "apo_dimple", pandda_lig_chain,
+    #                      params)
+    # summary_residue_plot(all_edstats_scores, 'ZD+a', 'RSZD-', protein_name, "apo_dimple", pandda_lig_chain,
+    #                      params)
+    #
+    # sys.exit()
+    #
+    #
+    # # Loop over all compounds in database with more than params.options.min_repeat
+    # # If the compounds have bound conformations, generate plots to show occupancy
+    #
+    # # TODO Add ability to loop over multiple database files
+    # # TODO Add flag to not rerun data already collected
+    # # TODO Add remote connection to diamond, so can be run/ developed without diamond access
+    # # TODO Add ability to detect whether file exist, and and a overwrite parameter to make stuff anyways
+    #
+    # for compound_csv, compound in detect_repeat_soaks(protein_name, params):
+    #     # TODO Fix datasource before running with this check
+    #     #if repeat_soak_has_bound_conformation(compound_csv):
+    #
+    #         # TODO fix If/else wrapper to loading csv, the multilevel index is not loading well from the csv
+    #
+    #     try:
+    #         pandda_lig_chain, all_edstats_scores = collate_edstats(compound_csv, compound, protein_name, params)
+    #
+    #         summary_residue_plot(all_edstats_scores, 'Ra', 'RSR', protein_name, compound, pandda_lig_chain, params)
+    #         summary_residue_plot(all_edstats_scores, 'BAa', 'Mean residue B factor', protein_name, compound,
+    #                              pandda_lig_chain, params)
+    #         summary_residue_plot(all_edstats_scores, 'CCPa', 'RSCC (population)', protein_name, compound,
+    #                              pandda_lig_chain, params)
+    #         summary_residue_plot(all_edstats_scores, 'CCSa', 'RSCC (sample)', protein_name, compound,
+    #                              pandda_lig_chain, params)
+    #         summary_residue_plot(all_edstats_scores, 'ZDa', 'RSZD', protein_name, compound, pandda_lig_chain,
+    #                              params)
+    #         summary_residue_plot(all_edstats_scores, 'ZOa', 'RSZO', protein_name, compound, pandda_lig_chain,
+    #                              params)
+    #         summary_residue_plot(all_edstats_scores, 'ZD+a', 'RSZD+', protein_name, compound, pandda_lig_chain,
+    #                              params)
+    #         summary_residue_plot(all_edstats_scores, 'ZD+a', 'RSZD-', protein_name, compound, pandda_lig_chain,
+    #                              params)
+    #     except TypeError as error_inst:
+    #         print "A type error has occured \n {} , ".format(error_inst)
+    #         print "likely due to collate_edstats failing, perhaps due to ligand chain not being supplied"
+    #
+    #
+    #
+    #     print all_edstats_scores
+    #     if os.path.exists(edstats_path):
+    #         all_edstats_scores = pd.read_csv(edstats_path, index_col=[0], header=[0,1,2,3,4])
+    #     else:
+    #         all_edstats_scores = collate_edstats(compound_csv, compound, protein_name, params)
+    #     try:
+    #         plot_mean_RSR(all_edstats_scores)
+    #     except:
+    #         continue
+
 if __name__ == '__main__':
     run_default(
         run=run,
