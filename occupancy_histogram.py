@@ -90,6 +90,8 @@ def detect_repeat_soaks(protein_name, params):
         else:
             file_name = str(compound[1]) + '.csv'
             file_path = os.path.join(params.output.out_dir, protein_name, file_name)
+            if not os.path.exists(os.path.join(params.output.out_dir,protein_name)):
+                os.mkdir(os.path.join(params.output.out_dir,protein_name))
             if os.path.exists(file_path) and not params.options.overwrite:
                 pass
             else:
@@ -758,61 +760,64 @@ def run(params):
 
         compound_check=compound.replace(" ", "")
 
+
         ###############################################################
         # Code for getting alternate refined PDB (not in database location
-        refined_pdbs = []
-        for root, dirs, files in os.walk(
-                "/dls/science/groups/i04-1/elliot-dev/Work/exhaustive_search/occupancy_group_with_refinement"):
-            for file in files:
-                if file == "refine.pdb":
-                    for file_x in os.listdir(root):
-                        if file_x.endswith(".cif"):
-                            current_compound = file_x.rstrip(".cif")
-                            print(current_compound)
-                            if current_compound == compound_check:
-                                refined_pdbs.append(os.path.join(root, file))
-
-        all_lig_occupancy = []
-        for pdb in refined_pdbs:
-
-            print(pdb)
-            occ_b_df = read_ligand_occupancy_b(pdb, params)
-
-            print(occ_b_df)
-
-            if occ_b_df is None:
-                print("Skipping Crystal,as it appears not to be exported via pandda.export")
-                continue
-            elif occ_b_df.apply(lambda x: x.nunique())[1] == 1:
-                lig_occ = occ_b_df.loc("Occupancy")[0][1]
-                all_lig_occupancy.append(lig_occ)
-            else:
-                print "Occupancy varies across ligand, histogram not currently generated"
-
-        print all_lig_occupancy
+        # refined_pdbs = []
+        # for root, dirs, files in os.walk(
+        #         "/dls/science/groups/i04-1/elliot-dev/Work/exhaustive_search/occupancy_group_with_refinement"):
+        #     for file in files:
+        #         if file == "refine.pdb":
+        #             for file_x in os.listdir(root):
+        #                 if file_x.endswith(".cif"):
+        #                     current_compound = file_x.rstrip(".cif")
+        #                     print(current_compound)
+        #                     if current_compound == compound_check:
+        #                         refined_pdbs.append(os.path.join(root, file))
+        #
+        # all_lig_occupancy = []
+        # for pdb in refined_pdbs:
+        #
+        #     print(pdb)
+        #     occ_b_df = read_ligand_occupancy_b(pdb, params)
+        #
+        #     print(occ_b_df)
+        #
+        #     if occ_b_df is None:
+        #         print("Skipping Crystal,as it appears not to be exported via pandda.export")
+        #         continue
+        #     elif occ_b_df.apply(lambda x: x.nunique())[1] == 1:
+        #         lig_occ = occ_b_df.loc("Occupancy")[0][1]
+        #         all_lig_occupancy.append(lig_occ)
+        #     else:
+        #         print "Occupancy varies across ligand, histogram not currently generated"
+        #
+        # print all_lig_occupancy
         ##################################################################
 
-        exhaustive_search_csv_path = "/dls/science/groups/i04-1/elliot-dev/Work/exhaustive_search/min_occ_u_iso_NUDT22_with_refinement.csv"
 
         # # Make directory for each compound
         # if not os.path.exists(os.path.join(params.output.out_dir, protein_name, compound)):
         #     os.mkdir(os.path.join(params.output.out_dir, protein_name, compound))
         #
-        if repeat_soak_has_bound_conformation(compound_csv):
-            print "Generating plots for {} with {} bound".format(protein_name, compound)
-            #     soak_failure_bar_chart(protein_name, compound, params)
-            #all_ligand_occupancy = all_lig_occ(compound_csv, params)
-            # occupancy_histogram(protein_name, compound, all_ligand_occupancy, params)
-            exhaustive_search_csv_path = "/dls/science/groups/i04-1/elliot-dev/Work/exhaustive_search/min_occ_u_iso_NUDT22_with_refinement.csv"
-            occupancy_histogram_with_exhaustive_search(protein_name, compound, all_lig_occupancy,
-                                                       exhaustive_search_csv_path, params)
+        print(compound)
+        if compound == "OX210":
+            if repeat_soak_has_bound_conformation(compound_csv):
+                print "Generating plots for {} with {} bound".format(protein_name, compound)
+                #     soak_failure_bar_chart(protein_name, compound, params)
+                all_lig_occupancy = all_lig_occ(compound_csv, params)
+                # occupancy_histogram(protein_name, compound, all_ligand_occupancy, params)
+                exhaustive_search_csv_path = "/dls/science/groups/i04-1/elliot-dev/Work/" \
+                                             "exhaustive_search/min_occ_u_iso_NUDT7_with_refinement.csv"
+                occupancy_histogram_with_exhaustive_search(protein_name, compound, all_lig_occupancy,
+                                                           exhaustive_search_csv_path, params)
 
-            #  occupancy_histogram_with_exhaustive_search(protein_name, compound, all_ligand_occupancy, exhaustive_search_csv_path, params)
-            # b_atom_plot(protein_name, compound, compound_csv, params)
-            # b_occ_scatter(protein_name, compound, compound_csv, params)
-        else:
-            print "{} Repeat Soak with {} has no bound conformations".format(protein_name, compound)
-        pass
+                #  occupancy_histogram_with_exhaustive_search(protein_name, compound, all_ligand_occupancy, exhaustive_search_csv_path, params)
+                # b_atom_plot(protein_name, compound, compound_csv, params)
+                # b_occ_scatter(protein_name, compound, compound_csv, params)
+            else:
+                print "{} Repeat Soak with {} has no bound conformations".format(protein_name, compound)
+            pass
 
 
     # # Make directory for each protein
